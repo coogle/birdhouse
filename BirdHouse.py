@@ -7,6 +7,8 @@ import time
 import imutils
 import cv2
 import datetime
+import sqlite3
+import cronex
 
 class BirdHouse:
     
@@ -17,13 +19,51 @@ class BirdHouse:
         self.camera.framerate = config['camera']['fps']
         self.pi = pigpio.pi()
         self.dht22 = DHT22.sensor(self.pi, config['dht22']['gpio'], None, power=config['dht22']['power'])
-     
+        self.sqlite = sqlite3.connect(config['sqlite_db'], 
+                                      detect_types = sqlite3.PARSE_DECLTYPES,
+                                      isolation_level = None)
+        
+        
+        c = self.sqlite.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_util timestamp, last_ran timestamp)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS weather (recorded_at timestamp, humidity REAL, temperature REAL)''')
+        
     def processWeather(self, humidity, temperature):
-        print "Humdity {}%, Temperature {}F".format(humidity, temperature)
+        c = self.sqlite.cursor()
+        c.execute("INSERT INTO weather VALUES(?, ?, ?)", (int(time.time()), humidity, temperature))
+        self.sqlite.commit()
     
     def processMotion(self):
         return
-      
+    
+    def processSchedule(self):
+        c = self.sqlite.cursor()
+        results = c.execute('SELECT * FROM outlets')
+        
+        for outlet in results:
+            
+            job = cronex.CronExpression(outlet[2].encode('ascii', 'ignore'))
+            
+            if job.check_trigger(time.gmtime(time.time())[:5]):
+                
+                c2 = self.sqlite.cursor()
+                c2.execute("SELECT * FROM outlets WHERE outlet_id = :outlet_id LIMIT 1", {'outlet_id' : outlet[0]})
+                
+                currentOutlet = c2.fetchone()
+                
+                if currentOutlet[4] is None:
+                    secondsSinceExecution = 61
+                else:
+                    secondsSinceExecution = (datetime.datetime.now() - currentOutlet[4]).total_seconds()
+                
+                if secondsSinceExecution > 60: 
+                    c2.execute("UPDATE outlets SET last_ran = ? WHERE outlet_id = ?", (datetime.datetime.now(), outlet[0]))
+                    if self.pi.read(outlet[0]):
+                        self.pi.write(outlet[0], 0)
+                    else:
+                        self.pi.write(outlet[0], 1)
+                        
+    
     def run(self):
         rawCapture = PiRGBArray(self.camera, size=tuple(self.config['camera']["resolution"]))
         next_dht_reading = int(time.time())
@@ -77,5 +117,8 @@ class BirdHouse:
                 
                 if key == ord('q'):
                     break
-                
-            rawCapture.truncate(0) 
+            
+            self.processSchedule()
+            
+            rawCapture.truncate(0)
+             
