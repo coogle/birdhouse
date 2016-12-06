@@ -9,6 +9,7 @@ import cv2
 import datetime
 import sqlite3
 import cronex
+import logging
 
 class BirdHouse:
     
@@ -23,18 +24,31 @@ class BirdHouse:
                                       detect_types = sqlite3.PARSE_DECLTYPES,
                                       isolation_level = None)
         
+        logging_level = getattr(logging, self.config['loglevel'].upper(), None)
+        
+        if not isinstance(logging_level, int):
+            raise ValueError('Invalid Log Level: %s' % self.config['loglevel'])
+        
+        logging.basicConfig(level = logging_level, filename = self.config['logfile'])
+        
+        logging.info("Initializing Birdhouse")
         
         c = self.sqlite.cursor()
+        
+        logging.debug("Creating Tables to store birdhouse data if they don't previously exist")
+        
         c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_until timestamp, last_ran timestamp)''')
         c.execute('''CREATE TABLE IF NOT EXISTS weather (recorded_at timestamp, humidity REAL, temperature REAL)''')
+        c.execute('PRAGMA journal_mode=WAL')
         
     def processWeather(self, humidity, temperature):
         c = self.sqlite.cursor()
-        c.execute("INSERT INTO weather VALUES(?, ?, ?)", (int(time.time()), humidity, temperature))
-        
         previousHistoryCut = datetime.datetime.now() - datetime.timedelta(days = self.config['dht22']['history_days'])
         
+        logging.debug("Deleting historic weather data older than %s" % previousHistoryCut)
+        
         c.execute("DELETE FROM weather WHERE recorded_at <= :history_cutoff", { 'history_cutoff' : previousHistoryCut })
+        c.execute("INSERT INTO weather VALUES(?, ?, ?)", (datetime.datetime.now(), humidity, temperature))
         
         self.sqlite.commit()
     
@@ -45,6 +59,8 @@ class BirdHouse:
         c.execute('UPDATE outlets set override_until = :override_until', {'override_until' : override_until})
         results = c.execute('SELECT * FROM outlets')
         
+        logging.debug("Motion Detected, overriding outlets to ON state until %s" % override_until)
+        
         for outlet in results:
             self.pi.write(outlet[0], 1)
     
@@ -52,6 +68,9 @@ class BirdHouse:
         c = self.sqlite.cursor()
         results = c.execute('SELECT * FROM outlets')
         
+        if c.rowcount ==  0:
+            logging.warning("No outlets defined in database. Please define outlets!")
+            
         for outlet in results:
             
             job = cronex.CronExpression(outlet[2].encode('ascii', 'ignore'))
@@ -72,11 +91,13 @@ class BirdHouse:
                 else:
                     secondsSinceExecution = (datetime.datetime.now() - currentOutlet[4]).total_seconds()
                 
-                if secondsSinceExecution > 60: 
+                if secondsSinceExecution > 60:
                     c2.execute("UPDATE outlets SET last_ran = ? WHERE outlet_id = ?", (datetime.datetime.now(), outlet[0]))
                     if self.pi.read(outlet[0]):
+                        logging.info("Outlet %i between switched to OFF per schedule %s" % (outlet[0], outlet[2].encode('ascii', 'ignore')))
                         self.pi.write(outlet[0], 0)
                     else:
+                        logging.info("Outlet %i between switched to ON per schedule %s" % (outlet[0], outlet[2].encode('ascii', 'ignore')))
                         self.pi.write(outlet[0], 1)
                         
     
@@ -84,6 +105,8 @@ class BirdHouse:
         rawCapture = PiRGBArray(self.camera, size=tuple(self.config['camera']["resolution"]))
         next_dht_reading = int(time.time())
         avg = None
+        
+        logging.info("Initializing Motion Capture")
         
         for f in self.camera.capture_continuous(rawCapture, format="bgr", use_video_port = True):
             frame = f.array
@@ -95,7 +118,9 @@ class BirdHouse:
                 
                 if (self.dht22.humidity() > 0) and (self.dht22.temperature() > 0) and not self.dht22.bad_checksum():
                     self.processWeather(self.dht22.humidity(), self.dht22.temperatureF())
-                
+                else:
+                    logging.warning("Failed to capture weather data!")
+                    
             frame = imutils.resize(frame, width = 500)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             gray = cv2.GaussianBlur(gray, (21, 21), 0)
@@ -103,6 +128,7 @@ class BirdHouse:
             if avg is None:
                 avg = gray.copy().astype("float")
                 rawCapture.truncate(0)
+                logging.info("No average background data available, creating from scratch based on current background")
                 continue
             
             cv2.accumulateWeighted(gray, avg, 0.5)
@@ -119,6 +145,7 @@ class BirdHouse:
                 
                 (x, y, w, h) = cv2.boundingRect(c)
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 1)
+                logging.info("Motion detected")
                 self.processMotion()
                 
             

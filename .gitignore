@@ -3,3 +3,6 @@
 .DS_Store
 config.json
 birdhouse.db
+birdhouse.db-shm
+birdhouse.db-wal
+birdhouse.log
