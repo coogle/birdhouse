@@ -25,16 +25,28 @@ class BirdHouse:
         
         
         c = self.sqlite.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_util timestamp, last_ran timestamp)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_until timestamp, last_ran timestamp)''')
         c.execute('''CREATE TABLE IF NOT EXISTS weather (recorded_at timestamp, humidity REAL, temperature REAL)''')
         
     def processWeather(self, humidity, temperature):
         c = self.sqlite.cursor()
         c.execute("INSERT INTO weather VALUES(?, ?, ?)", (int(time.time()), humidity, temperature))
+        
+        previousHistoryCut = datetime.datetime.now() - datetime.timedelta(days = self.config['dht22']['history_days'])
+        
+        c.execute("DELETE FROM weather WHERE recorded_at <= :history_cutoff", { 'history_cutoff' : previousHistoryCut })
+        
         self.sqlite.commit()
     
     def processMotion(self):
-        return
+        override_until = datetime.datetime.now() + datetime.timedelta(minutes = self.config['motion_timeout'])
+        
+        c = self.sqlite.cursor()
+        c.execute('UPDATE outlets set override_until = :override_until', {'override_until' : override_until})
+        results = c.execute('SELECT * FROM outlets')
+        
+        for outlet in results:
+            self.pi.write(outlet[0], 1)
     
     def processSchedule(self):
         c = self.sqlite.cursor()
@@ -48,8 +60,12 @@ class BirdHouse:
                 
                 c2 = self.sqlite.cursor()
                 c2.execute("SELECT * FROM outlets WHERE outlet_id = :outlet_id LIMIT 1", {'outlet_id' : outlet[0]})
-                
+                    
                 currentOutlet = c2.fetchone()
+
+                if currentOutlet[3] is not None:
+                    if currentOutlet[3] > datetime.datetime.now():
+                        return
                 
                 if currentOutlet[4] is None:
                     secondsSinceExecution = 61
