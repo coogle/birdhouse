@@ -1,0 +1,15 @@
+{
+	"camera" : {
+		"resolution" : [640, 480],
+		"fps" : 16,
+		"threshold" : 5,
+		"min_area" : 500,
+		"rotate" : 180
+	},
+	"dht22" : {
+		"gpio" : 4,
+		"power" : 22
+	},
+	"show_video" : true,
+	"sqlite_db" : "birdhouse.db"
+}
