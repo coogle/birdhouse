@@ -29,7 +29,9 @@ class BirdHouse:
         if not isinstance(logging_level, int):
             raise ValueError('Invalid Log Level: %s' % self.config['loglevel'])
         
-        logging.basicConfig(level = logging_level, filename = self.config['logfile'])
+        logging.basicConfig(level = logging_level, 
+                            filename = self.config['logfile'],
+                            format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         
         logging.info("Initializing Birdhouse")
         
@@ -37,7 +39,7 @@ class BirdHouse:
         
         logging.debug("Creating Tables to store birdhouse data if they don't previously exist")
         
-        c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_until timestamp, last_ran timestamp)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_until timestamp, last_ran timestamp, initial_state INT, schedule_active INT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS weather (recorded_at timestamp, humidity REAL, temperature REAL)''')
         c.execute('PRAGMA journal_mode=WAL')
         
@@ -49,8 +51,6 @@ class BirdHouse:
         
         c.execute("DELETE FROM weather WHERE recorded_at <= :history_cutoff", { 'history_cutoff' : previousHistoryCut })
         c.execute("INSERT INTO weather VALUES(?, ?, ?)", (datetime.datetime.now(), humidity, temperature))
-        
-        self.sqlite.commit()
     
     def processMotion(self):
         override_until = datetime.datetime.now() + datetime.timedelta(minutes = self.config['motion_timeout'])
@@ -73,10 +73,19 @@ class BirdHouse:
             
         for outlet in results:
             
+            if not outlet[6]:
+                logging.debug("Ignoring outlet %d becuse schedule is disabled" % outlet[0])
+                continue
+            
+            # Scheduling hints: https://github.com/ericpruitt/cronex
             job = cronex.CronExpression(outlet[2].encode('ascii', 'ignore'))
             
-            if job.check_trigger(time.gmtime(time.time())[:5]):
-                
+            logging.debug("Applying schedule '%s' to outlet %d (now: %s)" % (outlet[2], outlet[0], datetime.datetime.now()))
+            
+            if job.check_trigger(time.localtime(time.time())[:5]):
+            
+                logging.debug("Cron job for outlet %d triggered" % outlet[0])
+                    
                 c2 = self.sqlite.cursor()
                 c2.execute("SELECT * FROM outlets WHERE outlet_id = :outlet_id LIMIT 1", {'outlet_id' : outlet[0]})
                     
@@ -84,15 +93,22 @@ class BirdHouse:
 
                 if currentOutlet[3] is not None:
                     if currentOutlet[3] > datetime.datetime.now():
-                        return
+                        logging.debug("Override for outlet %d enabled" % outlet[0])
+                        continue
                 
                 if currentOutlet[4] is None:
+                    logging.debug("Last ran not provided for outlet %d" % outlet[0])
                     secondsSinceExecution = 61
                 else:
                     secondsSinceExecution = (datetime.datetime.now() - currentOutlet[4]).total_seconds()
+                    logging.debug("Outlet %d was last ran %s" % (outlet[0], secondsSinceExecution))
                 
                 if secondsSinceExecution > 60:
+                    
+                    logging.debug("Updating outlet %d last run time to %s" % (outlet[0], datetime.datetime.now()))
+                    
                     c2.execute("UPDATE outlets SET last_ran = ? WHERE outlet_id = ?", (datetime.datetime.now(), outlet[0]))
+                    
                     if self.pi.read(outlet[0]):
                         logging.info("Outlet %i between switched to OFF per schedule %s" % (outlet[0], outlet[2].encode('ascii', 'ignore')))
                         self.pi.write(outlet[0], 0)
@@ -105,6 +121,20 @@ class BirdHouse:
         rawCapture = PiRGBArray(self.camera, size=tuple(self.config['camera']["resolution"]))
         next_dht_reading = int(time.time())
         avg = None
+        
+        logging.info("Setting initial schedule state")
+        
+        c = self.sqlite.cursor()
+        
+        outlets = c.execute("SELECT * FROM outlets")
+        
+        for outlet in outlets:
+            if outlet[6]:
+                logging.debug("Initializing Outlet %d to %d" % (outlet[0], outlet[5]))
+                self.pi.write(outlet[0], outlet[5])
+            else:
+                logging.debug("Skipping Initialization of Outlet %d - inactive schedule" % outlet[0])
+                self.pi.write(outlet[0], outlet[5])
         
         logging.info("Initializing Motion Capture")
         
