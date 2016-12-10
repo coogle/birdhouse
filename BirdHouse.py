@@ -1,5 +1,6 @@
 from picamera import PiCamera
 from picamera.array import PiRGBArray
+from w1thermsensor import W1ThermSensor
 
 import pigpio
 import DHT22
@@ -20,7 +21,8 @@ class BirdHouse:
         self.camera.framerate = config['camera']['fps']
         self.pi = pigpio.pi()
         self.dht22 = DHT22.sensor(self.pi, config['dht22']['gpio'], None, power=config['dht22']['power'])
-        self.sqlite = sqlite3.connect(config['sqlite_db'], 
+        self.ds18b20 = W1ThermSensor(W1ThermSensor.THERM_SENSOR_DS18B20, config['ds18b20']['id'])
+	self.sqlite = sqlite3.connect(config['sqlite_db'], 
                                       detect_types = sqlite3.PARSE_DECLTYPES,
                                       isolation_level = None)
         
@@ -41,8 +43,12 @@ class BirdHouse:
         
         c.execute('''CREATE TABLE IF NOT EXISTS outlets (outlet_id INT, name TEXT, schedule TEXT, override_until timestamp, last_ran timestamp, initial_state INT, schedule_active INT)''')
         c.execute('''CREATE TABLE IF NOT EXISTS weather (recorded_at timestamp, humidity REAL, temperature REAL)''')
-        c.execute('PRAGMA journal_mode=WAL')
-        
+     
+	c.execute('''CREATE TABLE IF NOT EXISTS water_temp(recorded_at timestamp, temperature REAL)''')
+
+	c.execute('PRAGMA journal_mode=WAL')
+       
+      
     def processWeather(self, humidity, temperature):
         c = self.sqlite.cursor()
         previousHistoryCut = datetime.datetime.now() - datetime.timedelta(days = self.config['dht22']['history_days'])
@@ -51,7 +57,16 @@ class BirdHouse:
         
         c.execute("DELETE FROM weather WHERE recorded_at <= :history_cutoff", { 'history_cutoff' : previousHistoryCut })
         c.execute("INSERT INTO weather VALUES(?, ?, ?)", (datetime.datetime.now(), humidity, temperature))
-    
+
+    def processWaterTemp(self, temperature):
+	c = self.sqlite.cursor()
+	previousHistoryCut = datetime.datetime.now() - datetime.timedelta(days = self.config['ds18b20']['history_days'])
+
+	logging.debug("Deleting historic water data older than %s" % previousHistoryCut)
+
+	c.execute("DELETE FROM water_temp WHERE recorded_at <= :history_cutoff", { 'history_cutoff' : previousHistoryCut})
+	c.execute("INSERT INTO water_temp VALUES(?, ?)", (datetime.datetime.now(), temperature))
+
     def processMotion(self):
         override_until = datetime.datetime.now() + datetime.timedelta(minutes = self.config['motion_timeout'])
         
@@ -150,6 +165,8 @@ class BirdHouse:
                     self.processWeather(self.dht22.humidity(), self.dht22.temperatureF())
                 else:
                     logging.warning("Failed to capture weather data!")
+		
+		self.processWaterTemp(self.ds18b20.get_temperature(W1ThermSensor.DEGREES_F))
                     
             frame = imutils.resize(frame, width = 500)
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
