@@ -11,6 +11,10 @@
 		"power" : 22,
 		"history_days" : 60
 	},
+	"ds18b20" : {
+		"id" : "your-sensor-id-without-28",
+		"history_days" : 60
+	},
 	"show_video" : true,
 	"sqlite_db" : "birdhouse.db",
 	"motion_timeout" : 60,
